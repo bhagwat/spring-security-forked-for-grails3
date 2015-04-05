@@ -1,5 +1,11 @@
 package grails.plugins.springsecurity
 
+import grails.core.GrailsControllerClass
+import grails.plugin.springsecurity.ReflectionUtils
+import grails.plugin.springsecurity.SecurityEventListener
+import grails.plugin.springsecurity.SecurityFilterPosition
+import grails.plugin.springsecurity.SpringSecurityUtils
+
 /* Copyright 2006-2015 SpringSource.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,12 +20,6 @@ package grails.plugins.springsecurity
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-
-import grails.plugin.springsecurity.ReflectionUtils
-import grails.plugin.springsecurity.SecurityEventListener
-import grails.plugin.springsecurity.SecurityFilterPosition
-import grails.plugin.springsecurity.SpringSecurityUtils
 import grails.plugin.springsecurity.access.NullAfterInvocationProvider
 import grails.plugin.springsecurity.access.intercept.NullAfterInvocationManager
 import grails.plugin.springsecurity.access.vote.AuthenticatedVetoableDecisionManager
@@ -53,6 +53,8 @@ import grails.plugin.springsecurity.web.filter.DebugFilter
 import grails.plugin.springsecurity.web.filter.GrailsAnonymousAuthenticationFilter
 import grails.plugin.springsecurity.web.filter.GrailsRememberMeAuthenticationFilter
 import grails.plugin.springsecurity.web.filter.IpAddressFilter
+import grails.plugins.Plugin
+import org.grails.core.artefact.ControllerArtefactHandler
 import org.springframework.cache.ehcache.EhCacheFactoryBean
 import org.springframework.cache.ehcache.EhCacheManagerFactoryBean
 import org.springframework.expression.spel.standard.SpelExpressionParser
@@ -116,7 +118,7 @@ import javax.servlet.Filter
 /**
  * @author <a href='mailto:burt@burtbeckwith.com'>Burt Beckwith</a>
  */
-class SpringSecurityCoreGrailsPlugin {
+class SpringSecurityCoreGrailsPlugin extends Plugin {
 
     String version = '2.0-SNAPSHOT'
     String grailsVersion = '2.3.0 > *'
@@ -140,12 +142,388 @@ class SpringSecurityCoreGrailsPlugin {
     def issueManagement = [system: 'JIRA', url: 'http://jira.grails.org/browse/GPSPRINGSECURITYCORE']
     def scm = [url: 'https://github.com/grails-plugins/grails-spring-security-core']
 
+    @Override
+    Closure doWithSpring() {
+        { ->
+            ReflectionUtils.application = grailsApplication
+
+            if (grailsApplication.warDeployed) {
+                // need to reset here since web.xml was already built, so
+                // doWithWebDescriptor isn't called when deployed as war
+                SpringSecurityUtils.resetSecurityConfig()
+            }
+
+            SpringSecurityUtils.application = grailsApplication
+
+            def conf = SpringSecurityUtils.securityConfig
+            boolean printStatusMessages = (conf.printStatusMessages instanceof Boolean) ? conf.printStatusMessages : true
+            if (!conf || !conf.active) {
+                if (printStatusMessages) {
+                    println '\n\nSpring Security is disabled, not loading\n\n'
+                }
+                return
+            }
+
+            if (printStatusMessages) {
+                println '\nConfiguring Spring Security Core ...'
+            }
+
+            createRefList.delegate = delegate
+
+            /** springSecurityFilterChain */
+            configureFilterChain.delegate = delegate
+            configureFilterChain conf
+
+            // logout
+            configureLogout.delegate = delegate
+            configureLogout conf
+
+            /** securityContextRepository */
+            securityContextRepository(HttpSessionSecurityContextRepository) {
+                allowSessionCreation = conf.scr.allowSessionCreation // true
+                disableUrlRewriting = conf.scr.disableUrlRewriting // true
+                springSecurityContextKey = conf.scr.springSecurityContextKey // SPRING_SECURITY_CONTEXT
+            }
+
+            /** securityContextPersistenceFilter */
+            securityContextPersistenceFilter(SecurityContextPersistenceFilter, ref('securityContextRepository')) {
+                forceEagerSessionCreation = conf.scpf.forceEagerSessionCreation // false
+            }
+
+            /** authenticationProcessingFilter */
+            configureAuthenticationProcessingFilter.delegate = delegate
+            configureAuthenticationProcessingFilter conf
+
+            /** securityContextHolderAwareRequestFilter */
+            securityContextHolderAwareRequestFilter(SecurityContextHolderAwareRequestFilter) {
+                authenticationEntryPoint = ref('authenticationEntryPoint')
+                authenticationManager = ref('authenticationManager')
+                logoutHandlers = ref('logoutHandlers')
+            }
+
+            /** rememberMeAuthenticationFilter */
+            rememberMeAuthenticationFilter(GrailsRememberMeAuthenticationFilter,
+                    ref('authenticationManager'), ref('rememberMeServices'), ref('requestCache')) {
+                authenticationSuccessHandler = ref('authenticationSuccessHandler')
+                createSessionOnSuccess = conf.rememberMe.createSessionOnSuccess // true
+            }
+
+            userDetailsChecker(AccountStatusUserDetailsChecker)
+
+            authoritiesMapper(RoleHierarchyAuthoritiesMapper, ref('roleHierarchy'))
+
+            /** rememberMeServices */
+            if (conf.rememberMe.persistent) {
+                rememberMeServices(PersistentTokenBasedRememberMeServices, conf.rememberMe.key, ref('userDetailsService'), ref('tokenRepository')) {
+                    cookieName = conf.rememberMe.cookieName
+                    alwaysRemember = conf.rememberMe.alwaysRemember
+                    tokenValiditySeconds = conf.rememberMe.tokenValiditySeconds
+                    parameter = conf.rememberMe.parameter
+                    if (conf.rememberMe.useSecureCookie instanceof Boolean) {
+                        useSecureCookie = conf.rememberMe.useSecureCookie // null
+                    }
+                    authenticationDetailsSource = ref('authenticationDetailsSource')
+                    userDetailsChecker = ref('userDetailsChecker')
+                    authoritiesMapper = ref('authoritiesMapper')
+
+                    seriesLength = conf.rememberMe.persistentToken.seriesLength // 16
+                    tokenLength = conf.rememberMe.persistentToken.tokenLength // 16
+                }
+
+                tokenRepository(GormPersistentTokenRepository)
+            } else {
+                rememberMeServices(TokenBasedRememberMeServices, conf.rememberMe.key, ref('userDetailsService')) {
+                    cookieName = conf.rememberMe.cookieName
+                    alwaysRemember = conf.rememberMe.alwaysRemember
+                    tokenValiditySeconds = conf.rememberMe.tokenValiditySeconds
+                    parameter = conf.rememberMe.parameter
+                    if (conf.rememberMe.useSecureCookie instanceof Boolean) {
+                        useSecureCookie = conf.rememberMe.useSecureCookie // null
+                    }
+                    authenticationDetailsSource = ref('authenticationDetailsSource')
+                    userDetailsChecker = ref('userDetailsChecker')
+                    authoritiesMapper = ref('authoritiesMapper')
+                }
+
+                // register a lightweight impl so there's a bean in either case
+                tokenRepository(InMemoryTokenRepositoryImpl)
+            }
+
+            /** anonymousAuthenticationFilter */
+            anonymousAuthenticationFilter(GrailsAnonymousAuthenticationFilter) {
+                authenticationDetailsSource = ref('authenticationDetailsSource')
+                key = conf.anon.key
+            }
+
+            throwableAnalyzer(DefaultThrowableAnalyzer)
+
+            /** exceptionTranslationFilter */
+            exceptionTranslationFilter(ExceptionTranslationFilter, ref('authenticationEntryPoint'), ref('requestCache')) {
+                accessDeniedHandler = ref('accessDeniedHandler')
+                authenticationTrustResolver = ref('authenticationTrustResolver')
+                throwableAnalyzer = ref('throwableAnalyzer')
+            }
+            accessDeniedHandler(AjaxAwareAccessDeniedHandler) {
+                errorPage = conf.adh.errorPage == 'null' ? null : conf.adh.errorPage // '/login/denied' or 403
+                ajaxErrorPage = conf.adh.ajaxErrorPage
+                useForward = conf.adh.useForward
+                portResolver = ref('portResolver')
+                authenticationTrustResolver = ref('authenticationTrustResolver')
+                requestCache = ref('requestCache')
+            }
+
+            /** authenticationTrustResolver */
+            authenticationTrustResolver(AuthenticationTrustResolverImpl) {
+                anonymousClass = conf.atr.anonymousClass
+                rememberMeClass = conf.atr.rememberMeClass
+            }
+
+            // default 'authenticationEntryPoint'
+            authenticationEntryPoint(AjaxAwareAuthenticationEntryPoint, conf.auth.loginFormUrl) { // '/login/auth'
+                ajaxLoginFormUrl = conf.auth.ajaxLoginFormUrl // '/login/authAjax'
+                forceHttps = conf.auth.forceHttps // false
+                useForward = conf.auth.useForward // false
+                portMapper = ref('portMapper')
+                portResolver = ref('portResolver')
+            }
+
+            /** filterInvocationInterceptor */
+
+            // TODO doc new
+            if (conf.afterInvocationManagerProviderNames) {
+                afterInvocationManager(AfterInvocationProviderManager) {
+                    providers = [new NullAfterInvocationProvider()] // will be replaced in doWithApplicationContext
+                }
+            } else {
+                // register a lightweight impl so there's a bean in either case
+                afterInvocationManager(NullAfterInvocationManager)
+            }
+
+            filterInvocationInterceptor(FilterSecurityInterceptor) {
+                authenticationManager = ref('authenticationManager')
+                accessDecisionManager = ref('accessDecisionManager')
+                securityMetadataSource = ref('objectDefinitionSource')
+                runAsManager = ref('runAsManager')
+                afterInvocationManager = ref('afterInvocationManager')
+                alwaysReauthenticate = conf.fii.alwaysReauthenticate // false
+                rejectPublicInvocations = conf.fii.rejectPublicInvocations // true
+                validateConfigAttributes = conf.fii.validateConfigAttributes // true
+                publishAuthorizationSuccess = conf.fii.publishAuthorizationSuccess // false
+                observeOncePerRequest = conf.fii.observeOncePerRequest // true
+            }
+
+            String securityConfigType = SpringSecurityUtils.securityConfigType
+            if (securityConfigType != 'Annotation' &&
+                    securityConfigType != 'Requestmap' &&
+                    securityConfigType != 'InterceptUrlMap') {
+                println """
+ERROR: the 'securityConfigType' property must be one of
+'Annotation', 'Requestmap', or 'InterceptUrlMap' or left unspecified
+to default to 'Annotation'; setting value to 'Annotation'
+"""
+                securityConfigType = 'Annotation'
+            }
+
+            if (securityConfigType == 'Annotation') {
+                objectDefinitionSource(AnnotationFilterInvocationDefinition) {
+                    application = ref('grailsApplication')
+                    grailsUrlConverter = ref('grailsUrlConverter')
+                    mimeTypeResolver = ref('mimeTypeResolver')
+                    boolean lowercase = conf.controllerAnnotations.lowercase // true
+                    if (conf.rejectIfNoRule instanceof Boolean) {
+                        rejectIfNoRule = conf.rejectIfNoRule
+                    }
+                }
+            } else if (securityConfigType == 'Requestmap') {
+                objectDefinitionSource(RequestmapFilterInvocationDefinition) {
+                    if (conf.rejectIfNoRule instanceof Boolean) {
+                        rejectIfNoRule = conf.rejectIfNoRule
+                    }
+                }
+            } else if (securityConfigType == 'InterceptUrlMap') {
+                objectDefinitionSource(InterceptUrlMapFilterInvocationDefinition) {
+                    if (conf.rejectIfNoRule instanceof Boolean) {
+                        rejectIfNoRule = conf.rejectIfNoRule
+                    }
+                }
+            }
+
+            webInvocationPrivilegeEvaluator(GrailsWebInvocationPrivilegeEvaluator,
+                    ref('filterInvocationInterceptor'))
+
+            // voters
+            configureVoters.delegate = delegate
+            configureVoters conf
+
+            /** anonymousAuthenticationProvider */
+            anonymousAuthenticationProvider(GrailsAnonymousAuthenticationProvider)
+
+            /** rememberMeAuthenticationProvider */
+            rememberMeAuthenticationProvider(RememberMeAuthenticationProvider, conf.rememberMe.key)
+
+            // authenticationManager
+            configureAuthenticationManager.delegate = delegate
+            configureAuthenticationManager conf
+
+            /** daoAuthenticationProvider */
+            if (conf.dao.reflectionSaltSourceProperty) {
+                saltSource(ReflectionSaltSource) {
+                    userPropertyToUse = conf.dao.reflectionSaltSourceProperty
+                }
+            } else {
+                saltSource(NullSaltSource)
+            }
+
+            preAuthenticationChecks(DefaultPreAuthenticationChecks)
+            postAuthenticationChecks(DefaultPostAuthenticationChecks)
+
+            daoAuthenticationProvider(DaoAuthenticationProvider) {
+                userDetailsService = ref('userDetailsService')
+                passwordEncoder = ref('passwordEncoder')
+                userCache = ref('userCache')
+                saltSource = ref('saltSource')
+                preAuthenticationChecks = ref('preAuthenticationChecks')
+                postAuthenticationChecks = ref('postAuthenticationChecks')
+                authoritiesMapper = ref('authoritiesMapper')
+                hideUserNotFoundExceptions = conf.dao.hideUserNotFoundExceptions // true
+            }
+
+            /** passwordEncoder */
+            if (conf.password.algorithm == 'bcrypt') {
+                passwordEncoder(BCryptPasswordEncoder, conf.password.bcrypt.logrounds) // 10
+            } else if (conf.password.algorithm == 'pbkdf2') {
+                passwordEncoder(PBKDF2PasswordEncoder)
+            } else {
+                passwordEncoder(MessageDigestPasswordEncoder, conf.password.algorithm) {
+                    encodeHashAsBase64 = conf.password.encodeHashAsBase64 // false
+                    iterations = conf.password.hash.iterations // 10000
+                }
+            }
+
+            /** userDetailsService */
+            userDetailsService(GormUserDetailsService) {
+                grailsApplication = ref('grailsApplication')
+            }
+
+            /** authenticationUserDetailsService */
+            authenticationUserDetailsService(UserDetailsByNameServiceWrapper, ref('userDetailsService'))
+
+            // port mappings for channel security, etc.
+            portMapper(PortMapperImpl) {
+                portMappings = [(conf.portMapper.httpPort.toString()): conf.portMapper.httpsPort.toString()]
+                // 8080, 8443
+
+            }
+            portResolver(PortResolverImpl) {
+                portMapper = ref('portMapper')
+            }
+
+            // SecurityEventListener
+            if (conf.useSecurityEventListener) {
+                securityEventListener(SecurityEventListener)
+
+                authenticationEventPublisher(DefaultAuthenticationEventPublisher)
+            } else {
+                authenticationEventPublisher(NullAuthenticationEventPublisher)
+            }
+
+            // Basic Auth
+            if (conf.useBasicAuth) {
+                configureBasicAuth.delegate = delegate
+                configureBasicAuth conf
+            }
+
+            // Digest Auth
+            if (conf.useDigestAuth) {
+                configureDigestAuth.delegate = delegate
+                configureDigestAuth conf
+            }
+
+            // Switch User
+            if (conf.useSwitchUserFilter) {
+
+                // TODO doc new
+                switchUserAuthorityChanger(NullSwitchUserAuthorityChanger)
+
+                switchUserProcessingFilter(SwitchUserFilter) {
+                    userDetailsService = ref('userDetailsService')
+                    userDetailsChecker = ref('userDetailsChecker')
+                    authenticationDetailsSource = ref('authenticationDetailsSource')
+                    switchUserAuthorityChanger = ref('switchUserAuthorityChanger')
+                    switchUserUrl = conf.switchUser.switchUserUrl // '/j_spring_security_switch_user'
+                    exitUserUrl = conf.switchUser.exitUserUrl // '/j_spring_security_exit_user'
+                    usernameParameter = conf.switchUser.usernameParameter // '/j_spring_security_exit_user'
+                    if (conf.switchUser.targetUrl) {
+                        targetUrl = conf.switchUser.targetUrl
+                    } else {
+                        successHandler = ref('authenticationSuccessHandler')
+                    }
+                    if (conf.switchUser.switchFailureUrl) {
+                        switchFailureUrl = conf.switchUser.switchFailureUrl
+                    } else {
+                        failureHandler = ref('authenticationFailureHandler')
+                    }
+                }
+            }
+
+            // per-method run-as, defined here so it can be overridden
+            runAsManager(NullRunAsManager)
+
+            // x509
+            if (conf.useX509) {
+                configureX509.delegate = delegate
+                configureX509 conf
+            }
+
+            // channel (http/https) security
+            if (conf.secureChannel.definition) {
+                configureChannelProcessingFilter.delegate = delegate
+                configureChannelProcessingFilter conf
+            }
+
+            // IP filter
+            if (conf.ipRestrictions) {
+                configureIpFilter.delegate = delegate
+                configureIpFilter conf
+            }
+
+            // user details cache
+            if (conf.cacheUsers) {
+                userCache(EhCacheBasedUserCache) {
+                    cache = ref('securityUserCache')
+                }
+                securityUserCache(EhCacheFactoryBean) {
+                    cacheManager = ref('cacheManager')
+                    cacheName = 'userCache'
+                }
+                cacheManager(EhCacheManagerFactoryBean)
+            } else {
+                userCache(NullUserCache)
+            }
+
+            /** loggerListener */
+            if (conf.registerLoggerListener) {
+                loggerListener(LoggerListener)
+            }
+
+            if (conf.debug.useFilter) {
+                securityDebugFilter(DebugFilter, ref('springSecurityFilterChain'))
+            }
+
+            permissionEvaluator(DenyAllPermissionEvaluator)
+
+            if (printStatusMessages) {
+                println '... finished configuring Spring Security Core\n'
+            }
+        }
+    }
+
     // make sure the filter chain filter is after the Grails filter
     def doWithWebDescriptor = { xml ->
 
         SpringSecurityUtils.resetSecurityConfig()
 
-        ReflectionUtils.application = application
+        ReflectionUtils.application = grailsApplication
 
         def conf = SpringSecurityUtils.securityConfig
         if (!conf || !conf.active) {
@@ -184,400 +562,27 @@ class SpringSecurityCoreGrailsPlugin {
         }
     }
 
-    def doWithSpring = { application ->
-
-        ReflectionUtils.application = application
-
-        if (application.warDeployed) {
-            // need to reset here since web.xml was already built, so
-            // doWithWebDescriptor isn't called when deployed as war
-            SpringSecurityUtils.resetSecurityConfig()
-        }
-
-        SpringSecurityUtils.application = application
-
-        def conf = SpringSecurityUtils.securityConfig
-        boolean printStatusMessages = (conf.printStatusMessages instanceof Boolean) ? conf.printStatusMessages : true
-        if (!conf || !conf.active) {
-            if (printStatusMessages) {
-                println '\n\nSpring Security is disabled, not loading\n\n'
-            }
-            return
-        }
-
-        if (printStatusMessages) {
-            println '\nConfiguring Spring Security Core ...'
-        }
-
-        createRefList.delegate = delegate
-
-        /** springSecurityFilterChain */
-        configureFilterChain.delegate = delegate
-        configureFilterChain conf
-
-        // logout
-        configureLogout.delegate = delegate
-        configureLogout conf
-
-        /** securityContextRepository */
-        securityContextRepository(HttpSessionSecurityContextRepository) {
-            allowSessionCreation = conf.scr.allowSessionCreation // true
-            disableUrlRewriting = conf.scr.disableUrlRewriting // true
-            springSecurityContextKey = conf.scr.springSecurityContextKey // SPRING_SECURITY_CONTEXT
-        }
-
-        /** securityContextPersistenceFilter */
-        securityContextPersistenceFilter(SecurityContextPersistenceFilter, ref('securityContextRepository')) {
-            forceEagerSessionCreation = conf.scpf.forceEagerSessionCreation // false
-        }
-
-        /** authenticationProcessingFilter */
-        configureAuthenticationProcessingFilter.delegate = delegate
-        configureAuthenticationProcessingFilter conf
-
-        /** securityContextHolderAwareRequestFilter */
-        securityContextHolderAwareRequestFilter(SecurityContextHolderAwareRequestFilter) {
-            authenticationEntryPoint = ref('authenticationEntryPoint')
-            authenticationManager = ref('authenticationManager')
-            logoutHandlers = ref('logoutHandlers')
-        }
-
-        /** rememberMeAuthenticationFilter */
-        rememberMeAuthenticationFilter(GrailsRememberMeAuthenticationFilter,
-                ref('authenticationManager'), ref('rememberMeServices'), ref('requestCache')) {
-            authenticationSuccessHandler = ref('authenticationSuccessHandler')
-            createSessionOnSuccess = conf.rememberMe.createSessionOnSuccess // true
-        }
-
-        userDetailsChecker(AccountStatusUserDetailsChecker)
-
-        authoritiesMapper(RoleHierarchyAuthoritiesMapper, ref('roleHierarchy'))
-
-        /** rememberMeServices */
-        if (conf.rememberMe.persistent) {
-            rememberMeServices(PersistentTokenBasedRememberMeServices, conf.rememberMe.key, ref('userDetailsService'), ref('tokenRepository')) {
-                cookieName = conf.rememberMe.cookieName
-                alwaysRemember = conf.rememberMe.alwaysRemember
-                tokenValiditySeconds = conf.rememberMe.tokenValiditySeconds
-                parameter = conf.rememberMe.parameter
-                if (conf.rememberMe.useSecureCookie instanceof Boolean) {
-                    useSecureCookie = conf.rememberMe.useSecureCookie // null
-                }
-                authenticationDetailsSource = ref('authenticationDetailsSource')
-                userDetailsChecker = ref('userDetailsChecker')
-                authoritiesMapper = ref('authoritiesMapper')
-
-                seriesLength = conf.rememberMe.persistentToken.seriesLength // 16
-                tokenLength = conf.rememberMe.persistentToken.tokenLength // 16
-            }
-
-            tokenRepository(GormPersistentTokenRepository)
-        } else {
-            rememberMeServices(TokenBasedRememberMeServices, conf.rememberMe.key, ref('userDetailsService')) {
-                cookieName = conf.rememberMe.cookieName
-                alwaysRemember = conf.rememberMe.alwaysRemember
-                tokenValiditySeconds = conf.rememberMe.tokenValiditySeconds
-                parameter = conf.rememberMe.parameter
-                if (conf.rememberMe.useSecureCookie instanceof Boolean) {
-                    useSecureCookie = conf.rememberMe.useSecureCookie // null
-                }
-                authenticationDetailsSource = ref('authenticationDetailsSource')
-                userDetailsChecker = ref('userDetailsChecker')
-                authoritiesMapper = ref('authoritiesMapper')
-            }
-
-            // register a lightweight impl so there's a bean in either case
-            tokenRepository(InMemoryTokenRepositoryImpl)
-        }
-
-        /** anonymousAuthenticationFilter */
-        anonymousAuthenticationFilter(GrailsAnonymousAuthenticationFilter) {
-            authenticationDetailsSource = ref('authenticationDetailsSource')
-            key = conf.anon.key
-        }
-
-        throwableAnalyzer(DefaultThrowableAnalyzer)
-
-        /** exceptionTranslationFilter */
-        exceptionTranslationFilter(ExceptionTranslationFilter, ref('authenticationEntryPoint'), ref('requestCache')) {
-            accessDeniedHandler = ref('accessDeniedHandler')
-            authenticationTrustResolver = ref('authenticationTrustResolver')
-            throwableAnalyzer = ref('throwableAnalyzer')
-        }
-        accessDeniedHandler(AjaxAwareAccessDeniedHandler) {
-            errorPage = conf.adh.errorPage == 'null' ? null : conf.adh.errorPage // '/login/denied' or 403
-            ajaxErrorPage = conf.adh.ajaxErrorPage
-            useForward = conf.adh.useForward
-            portResolver = ref('portResolver')
-            authenticationTrustResolver = ref('authenticationTrustResolver')
-            requestCache = ref('requestCache')
-        }
-
-        /** authenticationTrustResolver */
-        authenticationTrustResolver(AuthenticationTrustResolverImpl) {
-            anonymousClass = conf.atr.anonymousClass
-            rememberMeClass = conf.atr.rememberMeClass
-        }
-
-        // default 'authenticationEntryPoint'
-        authenticationEntryPoint(AjaxAwareAuthenticationEntryPoint, conf.auth.loginFormUrl) { // '/login/auth'
-            ajaxLoginFormUrl = conf.auth.ajaxLoginFormUrl // '/login/authAjax'
-            forceHttps = conf.auth.forceHttps // false
-            useForward = conf.auth.useForward // false
-            portMapper = ref('portMapper')
-            portResolver = ref('portResolver')
-        }
-
-        /** filterInvocationInterceptor */
-
-        // TODO doc new
-        if (conf.afterInvocationManagerProviderNames) {
-            afterInvocationManager(AfterInvocationProviderManager) {
-                providers = [new NullAfterInvocationProvider()] // will be replaced in doWithApplicationContext
-            }
-        } else {
-            // register a lightweight impl so there's a bean in either case
-            afterInvocationManager(NullAfterInvocationManager)
-        }
-
-        filterInvocationInterceptor(FilterSecurityInterceptor) {
-            authenticationManager = ref('authenticationManager')
-            accessDecisionManager = ref('accessDecisionManager')
-            securityMetadataSource = ref('objectDefinitionSource')
-            runAsManager = ref('runAsManager')
-            afterInvocationManager = ref('afterInvocationManager')
-            alwaysReauthenticate = conf.fii.alwaysReauthenticate // false
-            rejectPublicInvocations = conf.fii.rejectPublicInvocations // true
-            validateConfigAttributes = conf.fii.validateConfigAttributes // true
-            publishAuthorizationSuccess = conf.fii.publishAuthorizationSuccess // false
-            observeOncePerRequest = conf.fii.observeOncePerRequest // true
-        }
-
-        String securityConfigType = SpringSecurityUtils.securityConfigType
-        if (securityConfigType != 'Annotation' &&
-                securityConfigType != 'Requestmap' &&
-                securityConfigType != 'InterceptUrlMap') {
-            println """
-ERROR: the 'securityConfigType' property must be one of
-'Annotation', 'Requestmap', or 'InterceptUrlMap' or left unspecified
-to default to 'Annotation'; setting value to 'Annotation'
-"""
-            securityConfigType = 'Annotation'
-        }
-
-        if (securityConfigType == 'Annotation') {
-            objectDefinitionSource(AnnotationFilterInvocationDefinition) {
-                application = ref('grailsApplication')
-                grailsUrlConverter = ref('grailsUrlConverter')
-                mimeTypeResolver = ref('mimeTypeResolver')
-                boolean lowercase = conf.controllerAnnotations.lowercase // true
-                if (conf.rejectIfNoRule instanceof Boolean) {
-                    rejectIfNoRule = conf.rejectIfNoRule
-                }
-            }
-        } else if (securityConfigType == 'Requestmap') {
-            objectDefinitionSource(RequestmapFilterInvocationDefinition) {
-                if (conf.rejectIfNoRule instanceof Boolean) {
-                    rejectIfNoRule = conf.rejectIfNoRule
-                }
-            }
-        } else if (securityConfigType == 'InterceptUrlMap') {
-            objectDefinitionSource(InterceptUrlMapFilterInvocationDefinition) {
-                if (conf.rejectIfNoRule instanceof Boolean) {
-                    rejectIfNoRule = conf.rejectIfNoRule
-                }
-            }
-        }
-
-        webInvocationPrivilegeEvaluator(GrailsWebInvocationPrivilegeEvaluator,
-                ref('filterInvocationInterceptor'))
-
-        // voters
-        configureVoters.delegate = delegate
-        configureVoters conf
-
-        /** anonymousAuthenticationProvider */
-        anonymousAuthenticationProvider(GrailsAnonymousAuthenticationProvider)
-
-        /** rememberMeAuthenticationProvider */
-        rememberMeAuthenticationProvider(RememberMeAuthenticationProvider, conf.rememberMe.key)
-
-        // authenticationManager
-        configureAuthenticationManager.delegate = delegate
-        configureAuthenticationManager conf
-
-        /** daoAuthenticationProvider */
-        if (conf.dao.reflectionSaltSourceProperty) {
-            saltSource(ReflectionSaltSource) {
-                userPropertyToUse = conf.dao.reflectionSaltSourceProperty
-            }
-        } else {
-            saltSource(NullSaltSource)
-        }
-
-        preAuthenticationChecks(DefaultPreAuthenticationChecks)
-        postAuthenticationChecks(DefaultPostAuthenticationChecks)
-
-        daoAuthenticationProvider(DaoAuthenticationProvider) {
-            userDetailsService = ref('userDetailsService')
-            passwordEncoder = ref('passwordEncoder')
-            userCache = ref('userCache')
-            saltSource = ref('saltSource')
-            preAuthenticationChecks = ref('preAuthenticationChecks')
-            postAuthenticationChecks = ref('postAuthenticationChecks')
-            authoritiesMapper = ref('authoritiesMapper')
-            hideUserNotFoundExceptions = conf.dao.hideUserNotFoundExceptions // true
-        }
-
-        /** passwordEncoder */
-        if (conf.password.algorithm == 'bcrypt') {
-            passwordEncoder(BCryptPasswordEncoder, conf.password.bcrypt.logrounds) // 10
-        } else if (conf.password.algorithm == 'pbkdf2') {
-            passwordEncoder(PBKDF2PasswordEncoder)
-        } else {
-            passwordEncoder(MessageDigestPasswordEncoder, conf.password.algorithm) {
-                encodeHashAsBase64 = conf.password.encodeHashAsBase64 // false
-                iterations = conf.password.hash.iterations // 10000
-            }
-        }
-
-        /** userDetailsService */
-        userDetailsService(GormUserDetailsService) {
-            grailsApplication = ref('grailsApplication')
-        }
-
-        /** authenticationUserDetailsService */
-        authenticationUserDetailsService(UserDetailsByNameServiceWrapper, ref('userDetailsService'))
-
-        // port mappings for channel security, etc.
-        portMapper(PortMapperImpl) {
-            portMappings = [(conf.portMapper.httpPort.toString()): conf.portMapper.httpsPort.toString()] // 8080, 8443
-
-        }
-        portResolver(PortResolverImpl) {
-            portMapper = ref('portMapper')
-        }
-
-        // SecurityEventListener
-        if (conf.useSecurityEventListener) {
-            securityEventListener(SecurityEventListener)
-
-            authenticationEventPublisher(DefaultAuthenticationEventPublisher)
-        } else {
-            authenticationEventPublisher(NullAuthenticationEventPublisher)
-        }
-
-        // Basic Auth
-        if (conf.useBasicAuth) {
-            configureBasicAuth.delegate = delegate
-            configureBasicAuth conf
-        }
-
-        // Digest Auth
-        if (conf.useDigestAuth) {
-            configureDigestAuth.delegate = delegate
-            configureDigestAuth conf
-        }
-
-        // Switch User
-        if (conf.useSwitchUserFilter) {
-
-            // TODO doc new
-            switchUserAuthorityChanger(NullSwitchUserAuthorityChanger)
-
-            switchUserProcessingFilter(SwitchUserFilter) {
-                userDetailsService = ref('userDetailsService')
-                userDetailsChecker = ref('userDetailsChecker')
-                authenticationDetailsSource = ref('authenticationDetailsSource')
-                switchUserAuthorityChanger = ref('switchUserAuthorityChanger')
-                switchUserUrl = conf.switchUser.switchUserUrl // '/j_spring_security_switch_user'
-                exitUserUrl = conf.switchUser.exitUserUrl // '/j_spring_security_exit_user'
-                usernameParameter = conf.switchUser.usernameParameter // '/j_spring_security_exit_user'
-                if (conf.switchUser.targetUrl) {
-                    targetUrl = conf.switchUser.targetUrl
-                } else {
-                    successHandler = ref('authenticationSuccessHandler')
-                }
-                if (conf.switchUser.switchFailureUrl) {
-                    switchFailureUrl = conf.switchUser.switchFailureUrl
-                } else {
-                    failureHandler = ref('authenticationFailureHandler')
-                }
-            }
-        }
-
-        // per-method run-as, defined here so it can be overridden
-        runAsManager(NullRunAsManager)
-
-        // x509
-        if (conf.useX509) {
-            configureX509.delegate = delegate
-            configureX509 conf
-        }
-
-        // channel (http/https) security
-        if (conf.secureChannel.definition) {
-            configureChannelProcessingFilter.delegate = delegate
-            configureChannelProcessingFilter conf
-        }
-
-        // IP filter
-        if (conf.ipRestrictions) {
-            configureIpFilter.delegate = delegate
-            configureIpFilter conf
-        }
-
-        // user details cache
-        if (conf.cacheUsers) {
-            userCache(EhCacheBasedUserCache) {
-                cache = ref('securityUserCache')
-            }
-            securityUserCache(EhCacheFactoryBean) {
-                cacheManager = ref('cacheManager')
-                cacheName = 'userCache'
-            }
-            cacheManager(EhCacheManagerFactoryBean)
-        } else {
-            userCache(NullUserCache)
-        }
-
-        /** loggerListener */
-        if (conf.registerLoggerListener) {
-            loggerListener(LoggerListener)
-        }
-
-        if (conf.debug.useFilter) {
-            securityDebugFilter(DebugFilter, ref('springSecurityFilterChain'))
-        }
-
-        permissionEvaluator(DenyAllPermissionEvaluator)
-
-        if (printStatusMessages) {
-            println '... finished configuring Spring Security Core\n'
-        }
-    }
-
-    def doWithDynamicMethods = { ctx ->
-
-        ReflectionUtils.application = application
+    @Override
+    void doWithDynamicMethods() {
+        ReflectionUtils.application = grailsApplication
 
         def conf = SpringSecurityUtils.securityConfig
         if (!conf || !conf.active) {
             return
         }
 
-        for (controllerClass in application.controllerClasses) {
-            addControllerMethods controllerClass.metaClass, ctx
+        for (controllerClass in grailsApplication.controllerClasses) {
+            addControllerMethods controllerClass.metaClass, applicationContext
         }
 
         if (SpringSecurityUtils.securityConfigType == 'Annotation') {
-            initializeFromAnnotations ctx, conf, application
+            initializeFromAnnotations applicationContext, conf, grailsApplication
         }
     }
 
-    def doWithApplicationContext = { ctx ->
-
-        ReflectionUtils.application = application
+    @Override
+    void doWithApplicationContext() {
+        ReflectionUtils.application = grailsApplication
 
         def conf = SpringSecurityUtils.securityConfig
         if (!conf || !conf.active) {
@@ -590,13 +595,13 @@ to default to 'Annotation'; setting value to 'Annotation'
         }
 
         // build filters here to give dependent plugins a chance to register some
-        def filterChain = ctx.springSecurityFilterChain
+        def filterChain = applicationContext.springSecurityFilterChain
         Map<RequestMatcher, List<Filter>> filterChainMap = [:]
 
         SortedMap<Integer, String> filterNames = findFilterChainNames(conf)
         def allConfiguredFilters = [:]
         filterNames.each { int order, String name ->
-            def filter = ctx.getBean(name)
+            def filter = applicationContext.getBean(name)
             allConfiguredFilters[name] = filter
             SpringSecurityUtils.configuredOrderedFilters[order] = filter
         }
@@ -625,7 +630,7 @@ to default to 'Annotation'; setting value to 'Annotation'
                     filters = new ArrayList(copy.values())
                 } else {
                     // explicit filter names
-                    filters = value.toString().split(',').collect { name -> ctx.getBean(name) }
+                    filters = value.toString().split(',').collect { name -> applicationContext.getBean(name) }
                 }
                 filterChainMap[new AntPathRequestMatcher(key)] = filters
             }
@@ -637,7 +642,7 @@ to default to 'Annotation'; setting value to 'Annotation'
 
         // build voters list here to give dependent plugins a chance to register some
         def voterNames = conf.voterNames ?: SpringSecurityUtils.voterNames
-        ctx.accessDecisionManager.decisionVoters = createBeanList(voterNames, ctx)
+        applicationContext.accessDecisionManager.decisionVoters = createBeanList(voterNames, applicationContext)
 
         // build providers list here to give dependent plugins a chance to register some
         def providerNames = []
@@ -649,51 +654,54 @@ to default to 'Annotation'; setting value to 'Annotation'
                 providerNames << 'x509AuthenticationProvider'
             }
         }
-        ctx.authenticationManager.providers = createBeanList(providerNames, ctx)
+        applicationContext.authenticationManager.providers = createBeanList(providerNames, applicationContext)
 
         // build handlers list here to give dependent plugins a chance to register some
         def logoutHandlerNames = conf.logout.handlerNames ?: SpringSecurityUtils.logoutHandlerNames
-        ctx.logoutHandlers.clear()
-        ctx.logoutHandlers.addAll createBeanList(logoutHandlerNames, ctx)
+        applicationContext.logoutHandlers.clear()
+        applicationContext.logoutHandlers.addAll createBeanList(logoutHandlerNames, applicationContext)
 
         // build after-invocation provider names here to give dependent plugins a chance to register some
         def afterInvocationManagerProviderNames = conf.afterInvocationManagerProviderNames ?: SpringSecurityUtils.afterInvocationManagerProviderNames
         if (afterInvocationManagerProviderNames) {
-            ctx.afterInvocationManager.providers = createBeanList(afterInvocationManagerProviderNames, ctx)
+            applicationContext.afterInvocationManager.providers = createBeanList(afterInvocationManagerProviderNames, applicationContext)
         }
 
         if (conf.debug.useFilter) {
-            ctx.removeAlias 'springSecurityFilterChain'
-            ctx.registerAlias 'securityDebugFilter', 'springSecurityFilterChain'
+            applicationContext.removeAlias 'springSecurityFilterChain'
+            applicationContext.registerAlias 'securityDebugFilter', 'springSecurityFilterChain'
         }
 
         if (conf.useDigestAuth) {
-            def passwordEncoder = ctx.passwordEncoder
+            def passwordEncoder = applicationContext.passwordEncoder
             if (passwordEncoder instanceof DigestAuthPasswordEncoder) {
                 passwordEncoder.resetInitializing()
             }
         }
     }
 
-    def onChange = { event ->
-
+    @Override
+    public void onChange(Map<String, Object> event) {
+        if (!(event.source instanceof Class)) {
+            return
+        }
         def conf = SpringSecurityUtils.securityConfig
         if (!conf || !conf.active) {
             return
         }
+        def application = grailsApplication
 
-        if (event.source && application.isControllerClass(event.source)) {
-
+        if (application.isArtefactOfType(ControllerArtefactHandler.TYPE, (Class) event.source)) {
             if (SpringSecurityUtils.securityConfigType == 'Annotation') {
-                initializeFromAnnotations event.ctx, conf, application
+                initializeFromAnnotations event.ctx, conf, grailsApplication
             }
-
-            addControllerMethods application.getControllerClass(event.source.name).metaClass, event.ctx
+            GrailsControllerClass controllerClass =(GrailsControllerClass) grailsApplication.getArtefact(ControllerArtefactHandler.TYPE, event.source.getClass().getName())
+            addControllerMethods controllerClass.metaClass, event.ctx
         }
     }
 
-    def onConfigChange = { event ->
-
+    @Override
+    public void onConfigChange(Map<String, Object> event) {
         SpringSecurityUtils.resetSecurityConfig()
 
         def conf = SpringSecurityUtils.securityConfig
@@ -703,7 +711,7 @@ to default to 'Annotation'; setting value to 'Annotation'
 
         if (SpringSecurityUtils.securityConfigType == 'Annotation') {
             // might have changed controllerAnnotations.staticRules
-            initializeFromAnnotations event.ctx, conf, application
+            initializeFromAnnotations event.ctx, conf, grailsApplication
         } else if (SpringSecurityUtils.securityConfigType == 'InterceptUrlMap') {
             event.ctx.objectDefinitionSource.reset()
         }
