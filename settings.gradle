@@ -1,0 +1,1 @@
+include 'test-security', 'spring-security-core'
