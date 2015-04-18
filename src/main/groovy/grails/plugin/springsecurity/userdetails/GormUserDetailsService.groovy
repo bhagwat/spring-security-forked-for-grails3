@@ -15,10 +15,13 @@
 package grails.plugin.springsecurity.userdetails
 
 import grails.core.GrailsApplication
+import grails.core.GrailsDomainClass
 import grails.plugin.springsecurity.SpringSecurityUtils
 import grails.transaction.Transactional
+import org.grails.core.artefact.DomainClassArtefactHandler
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.security.core.GrantedAuthority
 import org.springframework.security.core.authority.SimpleGrantedAuthority
 import org.springframework.security.core.userdetails.UserDetails
@@ -42,6 +45,7 @@ class GormUserDetailsService implements GrailsUserDetailsService {
     static final GrantedAuthority NO_ROLE = new SimpleGrantedAuthority(SpringSecurityUtils.NO_ROLE)
 
     /** Dependency injection for the application. */
+    @Autowired
     GrailsApplication grailsApplication
 
     @Transactional(readOnly = true, noRollbackFor = [IllegalArgumentException, UsernameNotFoundException])
@@ -49,7 +53,8 @@ class GormUserDetailsService implements GrailsUserDetailsService {
 
         def conf = SpringSecurityUtils.securityConfig
         String userClassName = conf.userLookup.userDomainClassName
-        def dc = grailsApplication.getDomainClass(userClassName)
+        GrailsDomainClass dc = (GrailsDomainClass) grailsApplication.getArtefact(DomainClassArtefactHandler.TYPE, userClassName)
+
         if (!dc) {
             throw new IllegalArgumentException("The specified user domain class '$userClassName' is not a domain class")
         }

@@ -237,7 +237,6 @@ public final class SpringSecurityUtils {
         if (_securityConfig == null) {
             reloadSecurityConfig();
         }
-
         return _securityConfig;
     }
 

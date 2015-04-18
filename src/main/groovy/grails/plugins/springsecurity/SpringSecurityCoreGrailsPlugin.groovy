@@ -5,6 +5,8 @@ import grails.plugin.springsecurity.ReflectionUtils
 import grails.plugin.springsecurity.SecurityEventListener
 import grails.plugin.springsecurity.SecurityFilterPosition
 import grails.plugin.springsecurity.SpringSecurityUtils
+import grails.plugin.springsecurity.access.NullAfterInvocationProvider
+import grails.plugin.springsecurity.access.intercept.NullAfterInvocationManager
 
 /* Copyright 2006-2015 SpringSource.
  *
@@ -20,8 +22,6 @@ import grails.plugin.springsecurity.SpringSecurityUtils
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import grails.plugin.springsecurity.access.NullAfterInvocationProvider
-import grails.plugin.springsecurity.access.intercept.NullAfterInvocationManager
 import grails.plugin.springsecurity.access.vote.AuthenticatedVetoableDecisionManager
 import grails.plugin.springsecurity.access.vote.ClosureVoter
 import grails.plugin.springsecurity.authentication.GrailsAnonymousAuthenticationProvider
@@ -147,6 +147,7 @@ class SpringSecurityCoreGrailsPlugin extends Plugin {
         { ->
             ReflectionUtils.application = grailsApplication
 
+            println ">>>>>>>>>>>>> grailsApplication.warDeployed : " + grailsApplication.warDeployed
             if (grailsApplication.warDeployed) {
                 // need to reset here since web.xml was already built, so
                 // doWithWebDescriptor isn't called when deployed as war
@@ -214,6 +215,7 @@ class SpringSecurityCoreGrailsPlugin extends Plugin {
 
             /** rememberMeServices */
             if (conf.rememberMe.persistent) {
+
                 rememberMeServices(PersistentTokenBasedRememberMeServices, conf.rememberMe.key, ref('userDetailsService'), ref('tokenRepository')) {
                     cookieName = conf.rememberMe.cookieName
                     alwaysRemember = conf.rememberMe.alwaysRemember
@@ -231,6 +233,7 @@ class SpringSecurityCoreGrailsPlugin extends Plugin {
                 }
 
                 tokenRepository(GormPersistentTokenRepository)
+
             } else {
                 rememberMeServices(TokenBasedRememberMeServices, conf.rememberMe.key, ref('userDetailsService')) {
                     cookieName = conf.rememberMe.cookieName
@@ -313,6 +316,7 @@ class SpringSecurityCoreGrailsPlugin extends Plugin {
             }
 
             String securityConfigType = SpringSecurityUtils.securityConfigType
+            println "Security config type:" + securityConfigType
             if (securityConfigType != 'Annotation' &&
                     securityConfigType != 'Requestmap' &&
                     securityConfigType != 'InterceptUrlMap') {
@@ -329,7 +333,6 @@ to default to 'Annotation'; setting value to 'Annotation'
                     application = ref('grailsApplication')
                     grailsUrlConverter = ref('grailsUrlConverter')
                     mimeTypeResolver = ref('mimeTypeResolver')
-                    boolean lowercase = conf.controllerAnnotations.lowercase // true
                     if (conf.rejectIfNoRule instanceof Boolean) {
                         rejectIfNoRule = conf.rejectIfNoRule
                     }
@@ -402,7 +405,8 @@ to default to 'Annotation'; setting value to 'Annotation'
 
             /** userDetailsService */
             userDetailsService(GormUserDetailsService) {
-                grailsApplication = ref('grailsApplication')
+                //TODO: getting typecast exception
+//                grailsApplication = ref('grailsApplication')
             }
 
             /** authenticationUserDetailsService */
@@ -600,13 +604,13 @@ to default to 'Annotation'; setting value to 'Annotation'
 
         SortedMap<Integer, String> filterNames = findFilterChainNames(conf)
         def allConfiguredFilters = [:]
-        filterNames.each { int order, String name ->
+        filterNames.each { Integer order, String name ->
             def filter = applicationContext.getBean(name)
             allConfiguredFilters[name] = filter
             SpringSecurityUtils.configuredOrderedFilters[order] = filter
         }
-
         if (conf.filterChain.chainMap) {
+            flatten(conf.filterChain, "chainMap")
             conf.filterChain.chainMap.each { key, value ->
                 value = value.toString().trim()
                 def filters
@@ -695,7 +699,8 @@ to default to 'Annotation'; setting value to 'Annotation'
             if (SpringSecurityUtils.securityConfigType == 'Annotation') {
                 initializeFromAnnotations event.ctx, conf, grailsApplication
             }
-            GrailsControllerClass controllerClass =(GrailsControllerClass) grailsApplication.getArtefact(ControllerArtefactHandler.TYPE, event.source.getClass().getName())
+            GrailsControllerClass controllerClass = (GrailsControllerClass) grailsApplication.getArtefact(ControllerArtefactHandler.TYPE, event.source.getClass().getName())
+
             addControllerMethods controllerClass.metaClass, event.ctx
         }
     }
@@ -719,6 +724,7 @@ to default to 'Annotation'; setting value to 'Annotation'
 
     private void initializeFromAnnotations(ctx, conf, application) {
         AnnotationFilterInvocationDefinition afid = ctx.objectDefinitionSource
+        flatten(conf.controllerAnnotations, "staticRules")
         afid.initialize conf.controllerAnnotations.staticRules,
                 ctx.grailsUrlMappingsHolder, application.controllerClasses
     }
@@ -1158,5 +1164,16 @@ to default to 'Annotation'; setting value to 'Annotation'
         // neither filter found
         def filters = xml.'filter'
         return filters[filters.size() - 1]
+    }
+
+    private void flatten(configToFlatten, attr) {
+        configToFlatten[attr] = configToFlatten[attr].inject([:]) { Map result, key, value ->
+            while (value instanceof Map) {
+                String tempKey = value.keySet()[0]
+                key += "." + tempKey
+                value = value[tempKey]
+            }
+            result[key] = value; return result
+        }
     }
 }

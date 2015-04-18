@@ -14,8 +14,10 @@
  */
 package grails.plugin.springsecurity
 
+import grails.core.GrailsApplication
 import grails.plugin.springsecurity.userdetails.GrailsUser
 import grails.transaction.Transactional
+import org.springframework.beans.factory.annotation.Autowired
 
 import javax.servlet.http.HttpServletRequest
 
@@ -36,7 +38,8 @@ class SpringSecurityService {
 	def authenticationTrustResolver
 
 	/** dependency injection for grailsApplication */
-	def grailsApplication
+	@Autowired
+	GrailsApplication grailsApplication
 
 	/** dependency injection for the password encoder */
 	def passwordEncoder

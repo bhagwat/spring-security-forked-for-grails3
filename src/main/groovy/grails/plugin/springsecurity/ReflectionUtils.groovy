@@ -123,6 +123,7 @@ class ReflectionUtils {
     static void setSecurityConfig(ConfigObject c) { getApplication().config.grails.plugin.springsecurity = c }
 
     static List<InterceptedUrl> splitMap(Map<String, Object> m, boolean expressions = true) {
+
         List<InterceptedUrl> split = []
         m.each { String key, value ->
             List tokens
@@ -131,7 +132,7 @@ class ReflectionUtils {
             } else { // String/GString
                 tokens = [value.toString()]
             }
-            split << new InterceptedUrl(key, null, ReflectionUtils.buildConfigAttributes(tokens, expressions))
+            split << new InterceptedUrl(key, null, buildConfigAttributes(tokens, expressions))
         }
         split
     }
@@ -139,9 +140,7 @@ class ReflectionUtils {
     // TODO doc List<Map> keys are pattern, access, httpMethod
     static List<InterceptedUrl> splitMap(List<Map<String, Object>> map) {
         List<InterceptedUrl> split = []
-
         for (Map<String, Object> row : map) {
-
             List tokens
             def value = row.access
             if (value instanceof Collection<?> || value.getClass().array) {
@@ -149,15 +148,12 @@ class ReflectionUtils {
             } else { // String/GString
                 tokens = [value.toString()]
             }
-
             def httpMethod = row.httpMethod
             if (httpMethod instanceof CharSequence) {
-                httpMethod = HttpMethod.valueOf(httpMethod)
+                httpMethod = HttpMethod.valueOf(httpMethod.toString())
             }
-
-            split << new InterceptedUrl(row.pattern, tokens, httpMethod)
+            split << new InterceptedUrl(row.pattern.toString(), tokens, (HttpMethod)httpMethod)
         }
-
         split
     }
 
@@ -185,7 +181,6 @@ class ReflectionUtils {
                 }
             }
         }
-
         configAttributes
     }
 
