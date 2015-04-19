@@ -14,7 +14,6 @@ class ${userClassName} implements Serializable {
 	Boolean passwordExpired = false
 
 	${userClassName}(String username, String password) {
-		this()
 		this.username = username
 		this.password = password
 	}

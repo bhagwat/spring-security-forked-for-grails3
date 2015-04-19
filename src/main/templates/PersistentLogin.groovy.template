@@ -1,4 +1,4 @@
-${packageDeclaration}
+package ${packageName}
 
 import org.apache.commons.lang.builder.HashCodeBuilder
 

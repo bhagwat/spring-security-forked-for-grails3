@@ -7,7 +7,6 @@ class ${groupClassName} implements Serializable {
 	String name
 
 	${groupClassName}(String name) {
-		this()
 		this.name = name
 	}
 

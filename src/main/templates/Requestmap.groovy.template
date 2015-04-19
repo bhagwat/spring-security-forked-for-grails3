@@ -12,7 +12,6 @@ class ${requestmapClassName} implements Serializable {
 	String url
 
 	${requestmapClassName}(String url, String configAttribute, HttpMethod httpMethod = null) {
-		this()
 		this.configAttribute = configAttribute
 		this.httpMethod = httpMethod
 		this.url = url

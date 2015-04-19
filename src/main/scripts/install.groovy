@@ -1,3 +1,5 @@
+description "Install plugin", "grails install plugin spring-security-core"
+
 println '''
 *******************************************************
 * You've installed the Spring Security Core plugin.   *
