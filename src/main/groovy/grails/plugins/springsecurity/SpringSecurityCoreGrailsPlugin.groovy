@@ -147,7 +147,6 @@ class SpringSecurityCoreGrailsPlugin extends Plugin {
         { ->
             ReflectionUtils.application = grailsApplication
 
-            println ">>>>>>>>>>>>> grailsApplication.warDeployed : " + grailsApplication.warDeployed
             if (grailsApplication.warDeployed) {
                 // need to reset here since web.xml was already built, so
                 // doWithWebDescriptor isn't called when deployed as war
